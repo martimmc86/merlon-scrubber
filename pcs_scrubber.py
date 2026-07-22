@@ -7,6 +7,7 @@ assign channels, and output a clean 3-column CSV.
 import os
 import sys
 import csv
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from threading import Thread
@@ -20,6 +21,17 @@ if platform.system() == "Windows":
         HAS_DND = True
     except Exception:
         pass
+
+
+def derive_output_name(base_name):
+    """Derive a default scrubbed filename from an input file's base name.
+
+    Strips a trailing "-Raw"/"-raw" (or "_Raw"/"_raw", any case) and replaces it
+    with "-PCS"; if no such suffix exists, "-PCS" is appended.
+    Example: "RVOC-520-Raw" -> "RVOC-520-PCS".
+    """
+    stripped = re.sub(r"[-_][Rr][Aa][Ww]$", "", base_name)
+    return f"{stripped}-PCS"
 
 
 def process_csv(filepath, out_dir, output_name=None, progress_cb=None):
@@ -82,10 +94,13 @@ def process_csv(filepath, out_dir, output_name=None, progress_cb=None):
                 date_str = (row.get("Initiation timestamp") or
                             next((v for k, v in row.items() if k.strip().lower() == "initiation timestamp"), "")).strip()
             else:
-                # RVOC format: prefixed contact_id, date in contact_day/contact_create_time
-                contact_id = row.get("contact_id", "")
+                # RVOC format: contact_id may carry a channel prefix
+                # (IN_CALL-/OUT_CALL-/CHAT-) OR be a bare UUID with the channel
+                # in a separate contact_channel/channel column.
+                contact_id = (row.get("contact_id") or "").strip()
                 date_str = ""
-                for col in ("contact_day", "contact_create_time", "connect_to_agent_date"):
+                for col in ("contact_day", "contact_day_pst", "contact_create_time",
+                            "connect_to_agent_date"):
                     if col in row and row[col]:
                         date_str = row[col].strip()
                         break
@@ -100,11 +115,25 @@ def process_csv(filepath, out_dir, output_name=None, progress_cb=None):
                     channel = "CHAT"
                     clean_id = contact_id[len("CHAT-"):]
                 else:
-                    prefix = contact_id.split("-")[0] if "-" in contact_id else contact_id
-                    reason = f"Unsupported channel: {prefix}"
-                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                    rows_skipped += 1
-                    continue
+                    # No known prefix: fall back to a separate channel column.
+                    raw_channel = ""
+                    for col in ("contact_channel", "channel"):
+                        if row.get(col):
+                            raw_channel = row[col].strip().upper()
+                            break
+                    clean_id = contact_id
+                    if raw_channel == "VOICE":
+                        channel = "VOICE"
+                    elif raw_channel == "CHAT":
+                        channel = "CHAT"
+                    else:
+                        if raw_channel:
+                            reason = f"Unsupported channel: {raw_channel}"
+                        else:
+                            reason = "No channel prefix or contact_channel column"
+                        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                        rows_skipped += 1
+                        continue
 
             # Parse date, output as M/D/YY
             formatted_date = date_str
@@ -237,9 +266,17 @@ def main():
     def set_input(path):
         state["input"] = path
         btn_input.config(text=f"📄 {os.path.basename(path)}")
+        # Default output directory to the input file's folder
+        in_dir = os.path.dirname(path)
+        if in_dir:
+            state["output"] = in_dir
+            btn_output.config(text=f"📁 {os.path.basename(in_dir)}/")
+        # Default output filename: input name with -Raw/-raw -> -PCS (editable)
+        base_name = os.path.splitext(os.path.basename(path))[0]
+        default_name = derive_output_name(base_name)
         entry_name.delete(0, "end")
-        entry_name.config(fg=DIM)
-        entry_name.insert(0, _placeholder)
+        entry_name.config(fg=FG)
+        entry_name.insert(0, default_name)
 
     btn_input.config(command=browse_file)
 
